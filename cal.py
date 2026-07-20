@@ -149,7 +149,8 @@ def calibrate_tx(radio, enc, dec, freq, freq_ctrl):
     radio.set_freqs(tx_freq=freq, rx_freq=freq_ctrl)
     radio.set_rx_buffer(CAL_RX_BUFFER)
     lo, hi = radio.rx_gain_limits()
-    radio.set_rx_gain(int(np.clip(40, lo, hi)))      # generous: just hearing acks
+    ack_gain = int(np.clip(40, lo, hi))              # generous starting point: just hearing acks
+    radio.set_rx_gain(ack_gain)
 
     locked = None
     t0 = time.time()
@@ -168,8 +169,22 @@ def calibrate_tx(radio, enc, dec, freq, freq_ctrl):
                       f"(decoded our beacon at {locked} dB)")
                 break
             print(f"  [sweep {rnd}] TX atten {atten:>4} dB -> no ack")
-        if locked is None:
-            print("  full sweep, no ack — RX still raising gain; sweeping again.")
+        if locked is not None:
+            break
+        if ack_gain < hi:
+            # A full sweep with zero acks doesn't mean RX never heard us — it may mean
+            # WE never heard RX's reply.  freq_ctrl (the ack return path) is a different
+            # carrier than freq (the beacon), so it can need more gain even when the
+            # forward link is strong.  Raise our own listening gain the same way
+            # calibrate_rx raises its data gain, instead of sweeping forever at a fixed
+            # 40 dB that may simply be too low for this link.
+            ack_gain = int(min(hi, ack_gain + CAL_GAIN_STEP))
+            radio.set_rx_gain(ack_gain)
+            print(f"  full sweep, no ack — raising ack-listen gain to {ack_gain} dB and "
+                  f"sweeping again.")
+        else:
+            print("  full sweep, no ack (ack-listen gain already maxed) — RX may still "
+                  "be raising its own gain; sweeping again.")
 
     if locked is None:
         chosen = CAL_FALLBACK_ATTEN
@@ -189,7 +204,7 @@ def calibrate_tx(radio, enc, dec, freq, freq_ctrl):
             break
     else:
         print("[TX] RX DONE not seen — continuing anyway.")
-    return int(np.clip(40, lo, hi)), chosen
+    return ack_gain, chosen
 
 
 def calibrate_rx(radio, enc, dec, freq, freq_ctrl, fallback_gain=40, fallback_atten=-10):
@@ -265,6 +280,9 @@ def calibrate_rx(radio, enc, dec, freq, freq_ctrl, fallback_gain=40, fallback_at
         if _recv_kind(radio, enc, dec, 'DONE', 1) is not None:
             print("[RX] TX locked power — sending DONE.")
             break
+    else:
+        print("[RX] [!] TX DONE not seen — TX may never have heard our ACK "
+              "(check the freq-ctrl return path); proceeding anyway.")
     radio.tx_cyclic_load(tile_to_buffer(make_cal_frame('DONE', 0, enc)))
     for _ in range(5):
         radio.rx()
