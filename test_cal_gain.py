@@ -9,6 +9,7 @@ had already locked. This drives the real state machines against a scripted MockR
 """
 import contextlib
 import io
+import time
 
 import cal
 
@@ -87,7 +88,40 @@ def test_rx_warns_when_tx_done_never_arrives():
     print("OK: RX warned about missing TX DONE instead of a silent false success")
 
 
+def test_rx_broadcasts_ack_scales_with_budget():
+    """RX's ACK/DONE-wait duration must track CAL_TIMEOUT_SECS, not a small fixed
+    round count -- a short, budget-independent window let RX switch off the ACK
+    before a real, slower TX sweep ever reached the atten step where it would
+    hear it (see the comment above the fix in calibrate_rx). Checking that
+    duration scales with the budget (rather than comparing to one fixed
+    threshold) keeps this robust regardless of this machine's decode speed."""
+    enc, dec = cal.load_model()
+
+    def incoming(radio):
+        return cal.tile_to_buffer(cal.make_cal_frame('TONE', -20, enc))  # TX never confirms
+
+    def run(budget):
+        radio = MockRadio(incoming)
+        orig_timeout, orig_dwell = cal.CAL_TIMEOUT_SECS, cal.CAL_RX_DWELL_SECS
+        cal.CAL_TIMEOUT_SECS = budget
+        cal.CAL_RX_DWELL_SECS = 0.2
+        t0 = time.time()
+        with contextlib.redirect_stdout(io.StringIO()):
+            cal.calibrate_rx(radio, enc, dec, freq=915e6, freq_ctrl=2437e6)
+        cal.CAL_TIMEOUT_SECS, cal.CAL_RX_DWELL_SECS = orig_timeout, orig_dwell
+        return time.time() - t0
+
+    short, long_ = run(2.0), run(6.0)
+    assert long_ - short > 2.0, (
+        f"RX's ACK-broadcast duration didn't scale with CAL_TIMEOUT_SECS "
+        f"(2s budget -> {short:.1f}s, 6s budget -> {long_:.1f}s) -- it's bounded "
+        f"by a small fixed round count again instead of the time budget")
+    print(f"OK: RX's ACK-broadcast duration scales with its budget "
+          f"(2s -> {short:.1f}s, 6s -> {long_:.1f}s)")
+
+
 if __name__ == "__main__":
     test_tx_raises_ack_gain_on_weak_return_path()
     test_rx_warns_when_tx_done_never_arrives()
+    test_rx_broadcasts_ack_scales_with_budget()
     print("\nALL CAL-GAIN TESTS PASS")

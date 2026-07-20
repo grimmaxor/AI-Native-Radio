@@ -276,11 +276,20 @@ def calibrate_rx(radio, enc, dec, freq, freq_ctrl, fallback_gain=40, fallback_at
           f"{heard_atten} dB) so TX can lock power ...")
 
     radio.tx_cyclic_load(tile_to_buffer(make_cal_frame('ACK', heard_atten, enc)))
-    for _ in range(CAL_DONE_ROUNDS):
+    # A fixed CAL_DONE_ROUNDS count is decoupled from CAL_TIMEOUT_SECS and from
+    # per-capture decode time (measured 0.08-0.4s depending on whether the buffer
+    # holds silence or a real frame) -- so this window's real duration doesn't track
+    # how long TX's sweep can actually take, and RX could switch off the ACK before
+    # TX's sweep ever reached the atten step where it would hear it. Keep
+    # re-broadcasting the ACK for the same time budget TX gets instead.
+    t_ack = time.time()
+    got_done = False
+    while (time.time() - t_ack) < CAL_TIMEOUT_SECS:
         if _recv_kind(radio, enc, dec, 'DONE', 1) is not None:
             print("[RX] TX locked power — sending DONE.")
+            got_done = True
             break
-    else:
+    if not got_done:
         print("[RX] [!] TX DONE not seen — TX may never have heard our ACK "
               "(check the freq-ctrl return path); proceeding anyway.")
     radio.tx_cyclic_load(tile_to_buffer(make_cal_frame('DONE', 0, enc)))
