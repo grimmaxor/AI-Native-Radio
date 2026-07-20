@@ -11,6 +11,8 @@ import contextlib
 import io
 import time
 
+import numpy as np
+
 import cal
 
 
@@ -120,8 +122,43 @@ def test_rx_broadcasts_ack_scales_with_budget():
           f"(2s -> {short:.1f}s, 6s -> {long_:.1f}s)")
 
 
+def test_rx_dwell_covers_a_full_tx_sweep():
+    """CAL_RX_DWELL_SECS must be long enough to see one full TX atten sweep
+    end-to-end, or RX can bump its own gain mid-sweep and chase a moving target
+    against TX instead of getting a clean shot at every atten value at one gain.
+    Measures a real simulated sweep (real decode calls, not the nominal formula)
+    so this fails if the constant regresses back to a capture-only estimate."""
+    enc, dec = cal.load_model()
+    rng = np.random.default_rng(0)
+    # small-amplitude noise, not exact zeros -- an all-zero buffer hits an early-exit
+    # fast path in the decoder and skips the real search, understating decode cost
+    noise = (1e-3 * (rng.standard_normal(cal.CAL_RX_BUFFER) +
+                      1j * rng.standard_normal(cal.CAL_RX_BUFFER))).astype(np.complex64)
+
+    def incoming(radio):
+        time.sleep(cal._CAP_SECS)   # this mock has no hardware, so simulate the
+                                     # physical capture latency a real Pluto has
+        return noise   # a real "no ack yet" capture still costs real decode time
+
+    radio = MockRadio(incoming)
+    t0 = time.time()
+    for atten in cal.CAL_ATTEN_SWEEP:
+        radio.set_tx_atten(atten)
+        radio.rx()                                          # flush, as calibrate_tx does
+        cal._recv_kind(radio, enc, dec, 'ACK', cal.CAL_ACK_CAPS)
+    measured_sweep = time.time() - t0
+
+    assert cal.CAL_RX_DWELL_SECS > measured_sweep, (
+        f"CAL_RX_DWELL_SECS ({cal.CAL_RX_DWELL_SECS:.1f}s) is shorter than one "
+        f"real measured TX sweep ({measured_sweep:.1f}s) -- RX would bump its own "
+        f"gain before TX finishes a full sweep")
+    print(f"OK: CAL_RX_DWELL_SECS={cal.CAL_RX_DWELL_SECS:.1f}s comfortably covers "
+          f"one measured TX sweep ({measured_sweep:.1f}s)")
+
+
 if __name__ == "__main__":
     test_tx_raises_ack_gain_on_weak_return_path()
     test_rx_warns_when_tx_done_never_arrives()
     test_rx_broadcasts_ack_scales_with_budget()
+    test_rx_dwell_covers_a_full_tx_sweep()
     print("\nALL CAL-GAIN TESTS PASS")

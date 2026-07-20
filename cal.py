@@ -57,7 +57,17 @@ ADC_FULLSCALE    = 2896.0
 ADC_CLIP_PCT     = 92                          # >= this projected % is treated as clipping
 
 _CAP_SECS         = CAL_RX_BUFFER / sync.SAMPLE_RATE
-CAL_TX_SWEEP_SECS = len(CAL_ATTEN_SWEEP) * CAL_ACK_CAPS * _CAP_SECS
+# ponytail: 0.15s is a measured typical decode+search compute cost per capture
+# attempt on this dev machine (real hardware may differ -- the 1.3x margin below
+# covers that). The old formula counted only CAL_ACK_CAPS * _CAP_SECS -- raw
+# capture time for the ack-listen captures alone -- and missed both the
+# once-per-atten-step flush capture (radio.rx() before the ack-listen) and all
+# decode compute, so it undercounted a real TX sweep by roughly 3x. That let
+# CAL_RX_DWELL_SECS expire before a full TX sweep had even been tried, so RX
+# could bump its own gain mid-sweep and chase a moving target against TX instead
+# of ever getting a clean shot at hearing every atten value at one gain.
+_DECODE_OVERHEAD_SECS = 0.15
+CAL_TX_SWEEP_SECS = len(CAL_ATTEN_SWEEP) * (1 + CAL_ACK_CAPS) * (_CAP_SECS + _DECODE_OVERHEAD_SECS)
 CAL_RX_DWELL_SECS = CAL_TX_SWEEP_SECS * 1.3 + 1.0    # one full TX sweep + margin
 
 # ─── tiny control-frame codec (rides inside a normal autoencoder frame) ──────
